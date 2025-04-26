@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import datetime
-from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as tc
 import pytz
 import os
 import requests
-import time
+#import time
 from stockstats import StockDataFrame as Sdf
+import time as time_module  # rename it safely
 
 class EodhdProcessor:
     def __init__(self, csv_folder="./"):
@@ -281,7 +281,7 @@ class EodhdProcessor:
         mapping = {old: new for new, old in enumerate(sorted(unique_days))}
         df['Day'] = df['Day'].map(mapping)
 
-        return df 
+        return df, mapping
 
 
     def clean_data(self, df, min_24 = True):
@@ -289,14 +289,9 @@ class EodhdProcessor:
         df.rename(columns={'ticker': 'tic'}, inplace=True)
         df.rename(columns={'datetime': 'time'}, inplace=True)
         df['time'] = pd.to_datetime(df['time'])
-
-
-
         df = df[["time", "open", "high", "low", "close", "volume", "tic", "Day"]]
-
         # remove 16:00 data
         df.drop(df[df["time"].astype(str).str.endswith("16:00:00")].index, inplace=True)
-        
         df.sort_values(by=["tic", "time"], inplace=True)
         df.reset_index(drop=True, inplace=True)
 
@@ -304,14 +299,24 @@ class EodhdProcessor:
         tics = df["tic"].unique()
         days = df["Day"].unique()
 
-        start_time = df['time'].min()
-        end_time = df['time'].max()
+  
         start_time = df['time'].min().replace(hour=0, minute=0, second=0)
         end_time = df['time'].max().replace(hour=23, minute=59, second=0)
-        time_range = pd.date_range(start=start_time, end=end_time, freq='min')  # 'T' is minute frequency
-        minute_df = pd.DataFrame({'time': time_range})
+        time_range = pd.date_range(start=start_time, end=end_time, freq='min') 
 
 
+        df['date_only'] = df['time'].dt.date
+        days_dict = dict(zip(df['Day'], df['date_only']))
+        all_rows = []
+        for day_num, date in days_dict.items():
+            minute_times = pd.date_range(start=pd.Timestamp(date), periods=1440, freq='min')
+            for time in minute_times:
+                all_rows.append({'time': time, 'day': day_num})
+        df.drop(columns=['date_only'], inplace=True)
+        df_minute_lvl = pd.DataFrame(all_rows)
+
+
+        grouped = df.groupby(['Day', 'tic'])
 
 
 
@@ -322,30 +327,23 @@ class EodhdProcessor:
 
             for day in days:
 
+                start = time_module.time()
+                print("day {}/{}".format(str(day), str(len(days))))
 
-
-                # 0) Create the sub df of the missing times
-
-                times_for_this_tic_and_day = df.loc[(df['Day'] == day) & (df['tic'] == tic), 'time']
+                subset = grouped.get_group((day, tic))
+                times_for_this_tic_and_day = subset['time']
                 times_for_this_tic_and_day = pd.to_datetime(times_for_this_tic_and_day)
    
-                
                 if min_24:
-                    specific_day  = df.loc[(df['Day'] == day) & (df['tic'] == tic), 'time'].iloc[0].date()
-                    filtered_minute_df = minute_df[minute_df['time'].dt.date == pd.to_datetime(specific_day).date()]
-                    filtered_minute_df['time'] = pd.to_datetime(filtered_minute_df['time'])
+                    filtered_minute_df = df_minute_lvl.loc[df_minute_lvl['day'] == day]
+                    filtered_minute_df.drop(columns=['day'], inplace=True)
                     missing_times = filtered_minute_df[~filtered_minute_df['time'].isin(times_for_this_tic_and_day)]
+
                 else:
-                    # all times across all tics, for the day
-                    # Filter the DataFrame for the given Day (e.g., day_value = 3)
                     existing_time_values = df[df['Day'] == day]['time'].unique()
-
-
-
                     existing_time_df = pd.DataFrame({'time': pd.to_datetime(existing_time_values)})
                     missing_times = existing_time_df[~existing_time_df['time'].isin(times_for_this_tic_and_day)]
                    
-
 
                 missing_times['open'] = np.nan               # float64
                 missing_times['high'] = np.nan               # float64
@@ -363,41 +361,25 @@ class EodhdProcessor:
                     'tic': 'object',
                     'Day': 'int64'
                 })
-   
 
-                # 1) Add the sub df (missing_times) to df
-                # Example: insert after the last row where Day = 2 and tic = "AAPL"
-                mask = (df['Day'] == day) & (df['tic'] == tic)
-                insert_index = df[mask].index.max()
-
-                # Split df_orig and insert df in between
-                df_before = df.iloc[:insert_index + 1]
-                df_after = df.iloc[insert_index + 1:]
-
-                df = pd.concat([df_before, missing_times, df_after], ignore_index=True)
-
-                df.sort_values(by=["tic", "time"], inplace=True)
-                df.reset_index(drop=True, inplace=True)
+                df = pd.concat([df, missing_times], ignore_index=True)
+            df.sort_values(by=["tic", "time"], inplace=True)
+            df.reset_index(drop=True, inplace=True)
 
 
         # Replace all 0 volume with a Nan  (to allow for ffill and bfill to work)
         df.loc[df['volume'] == 0, 'volume'] = np.nan
 
 
-
         ## FILLING THE MISSING ROWS
         for tic in tics:
-
-
             print("Filling Missing Rows for tic {}".format(tic))
-
-
             cols_to_ffill = ['close', 'open', 'high', 'low', 'volume']
             df.loc[df['tic'] == tic, cols_to_ffill] = (
                 df.loc[df['tic'] == tic, cols_to_ffill].ffill().bfill()
             )
 
-
+        df.reset_index(drop=True, inplace=True)
         return df
 
 
