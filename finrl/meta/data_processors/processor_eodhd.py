@@ -7,9 +7,15 @@ import pandas_market_calendars as tc
 import pytz
 import os
 import requests
+import dask.dataframe as dd
 #import time
 from stockstats import StockDataFrame as Sdf
 import time as time_module  # rename it safely
+import warnings
+from pandas.errors import SettingWithCopyWarning
+import gc  # Garbage collector
+# warnings.simplefilter(action='ignore', category=SettingWithCopyWarning)
+import psutil
 
 class EodhdProcessor:
     def __init__(self, csv_folder="./"):
@@ -291,7 +297,8 @@ class EodhdProcessor:
         df['time'] = pd.to_datetime(df['time'])
         df = df[["time", "open", "high", "low", "close", "volume", "tic", "Day"]]
         # remove 16:00 data
-        df.drop(df[df["time"].astype(str).str.endswith("16:00:00")].index, inplace=True)
+        #df.drop(df[df["time"].astype(str).str.endswith("16:00:00")].index, inplace=True)
+        df = df.drop(df[df["time"].astype(str).str.endswith("16:00:00")].index)
         df.sort_values(by=["tic", "time"], inplace=True)
         df.reset_index(drop=True, inplace=True)
 
@@ -315,43 +322,55 @@ class EodhdProcessor:
         df.drop(columns=['date_only'], inplace=True)
         df_minute_lvl = pd.DataFrame(all_rows)
 
+        process = psutil.Process(os.getpid())
+        print(f"Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
+
+
+
+        df_size_bytes = df.memory_usage(deep=True).sum()
+        total_gb = df_size_bytes / (1024 ** 3)
+        print(f"Estimated memory needed (for concat only): {total_gb:.2f} GB")
+
 
         grouped = df.groupby(['Day', 'tic'])
 
 
+        process = psutil.Process(os.getpid())
+        print(f"Memory usage1: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
 
-        # ADDING MISSING ROWS
-        for tic in tics:
+
+
+        missing_times_list = []
+
+
+        total_total = 0
+
+        # Instead of collecting all in missing_times_list and concatenating at the end...
+
+        for cc, tic in enumerate(tics):
+            print("Adding Missing Rows for tic {}, {}/{}".format(tic, cc, len(tics)))
             
-            print("Adding Missing Rows for tic {}".format(tic))
-
             for day in days:
-
-                start = time_module.time()
-                print("day {}/{}".format(str(day), str(len(days))))
-
                 subset = grouped.get_group((day, tic))
                 times_for_this_tic_and_day = subset['time']
                 times_for_this_tic_and_day = pd.to_datetime(times_for_this_tic_and_day)
-   
-                if min_24:
-                    filtered_minute_df = df_minute_lvl.loc[df_minute_lvl['day'] == day]
-                    filtered_minute_df.drop(columns=['day'], inplace=True)
-                    missing_times = filtered_minute_df[~filtered_minute_df['time'].isin(times_for_this_tic_and_day)]
 
+                if min_24:
+                    filtered_minute_df = df_minute_lvl.loc[df_minute_lvl['day'] == day].copy()
+                    filtered_minute_df = filtered_minute_df.drop(columns=['day'])
+                    missing_times = filtered_minute_df[~filtered_minute_df['time'].isin(times_for_this_tic_and_day)].copy()
                 else:
                     existing_time_values = df[df['Day'] == day]['time'].unique()
                     existing_time_df = pd.DataFrame({'time': pd.to_datetime(existing_time_values)})
                     missing_times = existing_time_df[~existing_time_df['time'].isin(times_for_this_tic_and_day)]
-                   
 
-                missing_times['open'] = np.nan               # float64
-                missing_times['high'] = np.nan               # float64
-                missing_times['low'] = np.nan                # float64
-                missing_times['close'] = np.nan              # float64
-                missing_times['volume'] = np.nan             # float64
-                missing_times['tic'] = tic                   # object (empty string is still an object)
-                missing_times['Day'] = day                     # int64
+                missing_times.loc[:, 'open'] = np.nan
+                missing_times.loc[:, 'high'] = np.nan
+                missing_times.loc[:, 'low'] = np.nan
+                missing_times.loc[:, 'close'] = np.nan
+                missing_times.loc[:, 'volume'] = np.nan
+                missing_times.loc[:, 'tic'] = tic
+                missing_times.loc[:, 'Day'] = day
                 missing_times = missing_times.astype({
                     'open': 'float64',
                     'high': 'float64',
@@ -362,14 +381,100 @@ class EodhdProcessor:
                     'Day': 'int64'
                 })
 
-                df = pd.concat([df, missing_times], ignore_index=True)
-            df.sort_values(by=["tic", "time"], inplace=True)
-            df.reset_index(drop=True, inplace=True)
+                # if not missing_times.empty:
+                #     df = pd.concat([df, missing_times], ignore_index=True)   # << concat incrementally
 
+                
+                missing_times_list.append(missing_times)
+
+                #total_total += missing_times.memory_usage(deep=True).sum()
+
+            process = psutil.Process(os.getpid())
+            print(f"Memory usage2: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
+
+
+        process = psutil.Process(os.getpid())
+        print(f"Memory usage3: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
+
+
+        # total_gb_bis = total_total / (1024 ** 3)
+        # print(f"Estimated memory needed (for concat only): {total_gb_bis:.2f} GB") # 12.27 GB + 4.41 GB
+
+        exit()
+
+        #df = pd.concat([df] + missing_times_list, ignore_index=True) 
+
+        # Measure size of df
+        df_size_bytes = df.memory_usage(deep=True).sum()
+
+        # Measure size of missing_times_list
+        missing_times_size_bytes = sum(m.memory_usage(deep=True).sum() for m in missing_times_list)
+
+        # Total size in bytes
+        total_bytes = df_size_bytes + missing_times_size_bytes
+
+        # Convert to GB
+        total_gb = total_bytes / (1024 ** 3)
+
+        print(f"Estimated memory needed (for concat only): {total_gb:.2f} GB")
+
+
+
+
+
+
+
+        print("the end")
+        exit()
+        # # Convert your main df and list of dfs into Dask dataframes
+        # dask_dfs = [dd.from_pandas(df, npartitions=5)] + [dd.from_pandas(d, npartitions=5) for d in missing_times_list]
+
+        # # Concatenate them
+        # result = dd.concat(dask_dfs)
+
+        # # To trigger computation and bring it back to pandas (if you really need it as a pandas dataframe)
+        # # BE CAREFUL: this will bring it into memory
+        # final_result = result.compute()
+
+
+
+        # exit()
+
+
+
+
+
+
+
+
+
+
+
+        print("ICI0")
+        df = pd.concat([df] + missing_times_list, ignore_index=True)
+        print("ICI1")
+
+        df.to_parquet("temp.parquet")
+        del df
+        gc.collect()  # Force garbage collection
+        ddf = dd.read_parquet("temp.parquet")
+
+        #ddf = dd.from_pandas(df, npartitions=10)
+        print("ICI111")
+        ddf = ddf.sort_values(["tic", "time"])
+        print("ICI1111111")
+        df_sorted = ddf.compute()
+        print("ICI222")
+
+        
+        # df.sort_values(by=["tic", "time"], kind='mergesort', inplace=True)
+        # print("ICI2")
+        # df.reset_index(drop=True, inplace=True)
+        
+        return 1
 
         # Replace all 0 volume with a Nan  (to allow for ffill and bfill to work)
         df.loc[df['volume'] == 0, 'volume'] = np.nan
-
 
         ## FILLING THE MISSING ROWS
         for tic in tics:
