@@ -16,6 +16,8 @@ from pandas.errors import SettingWithCopyWarning
 import gc  # Garbage collector
 # warnings.simplefilter(action='ignore', category=SettingWithCopyWarning)
 import psutil
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
 
 class EodhdProcessor:
     def __init__(self, csv_folder="./"):
@@ -339,7 +341,6 @@ class EodhdProcessor:
         print(f"Memory usage1: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
 
 
-
         missing_times_list = []
 
 
@@ -381,98 +382,18 @@ class EodhdProcessor:
                     'Day': 'int64'
                 })
 
-                # if not missing_times.empty:
-                #     df = pd.concat([df, missing_times], ignore_index=True)   # << concat incrementally
 
-                
-                missing_times_list.append(missing_times)
-
-                #total_total += missing_times.memory_usage(deep=True).sum()
-
-            process = psutil.Process(os.getpid())
-            print(f"Memory usage2: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
+                if not missing_times.empty:
+                    missing_times_list.append(missing_times)
 
 
-        process = psutil.Process(os.getpid())
-        print(f"Memory usage3: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
+        df = pd.concat([df] + missing_times_list, ignore_index=True) 
+        print("finally")
 
+        df.sort_values(["tic", "time"], inplace=True)
 
-        # total_gb_bis = total_total / (1024 ** 3)
-        # print(f"Estimated memory needed (for concat only): {total_gb_bis:.2f} GB") # 12.27 GB + 4.41 GB
-
-        exit()
-
-        #df = pd.concat([df] + missing_times_list, ignore_index=True) 
-
-        # Measure size of df
-        df_size_bytes = df.memory_usage(deep=True).sum()
-
-        # Measure size of missing_times_list
-        missing_times_size_bytes = sum(m.memory_usage(deep=True).sum() for m in missing_times_list)
-
-        # Total size in bytes
-        total_bytes = df_size_bytes + missing_times_size_bytes
-
-        # Convert to GB
-        total_gb = total_bytes / (1024 ** 3)
-
-        print(f"Estimated memory needed (for concat only): {total_gb:.2f} GB")
-
-
-
-
-
-
-
-        print("the end")
-        exit()
-        # # Convert your main df and list of dfs into Dask dataframes
-        # dask_dfs = [dd.from_pandas(df, npartitions=5)] + [dd.from_pandas(d, npartitions=5) for d in missing_times_list]
-
-        # # Concatenate them
-        # result = dd.concat(dask_dfs)
-
-        # # To trigger computation and bring it back to pandas (if you really need it as a pandas dataframe)
-        # # BE CAREFUL: this will bring it into memory
-        # final_result = result.compute()
-
-
-
-        # exit()
-
-
-
-
-
-
-
-
-
-
-
-        print("ICI0")
-        df = pd.concat([df] + missing_times_list, ignore_index=True)
-        print("ICI1")
-
-        df.to_parquet("temp.parquet")
-        del df
-        gc.collect()  # Force garbage collection
-        ddf = dd.read_parquet("temp.parquet")
-
-        #ddf = dd.from_pandas(df, npartitions=10)
-        print("ICI111")
-        ddf = ddf.sort_values(["tic", "time"])
-        print("ICI1111111")
-        df_sorted = ddf.compute()
-        print("ICI222")
-
+        print("sorted")
         
-        # df.sort_values(by=["tic", "time"], kind='mergesort', inplace=True)
-        # print("ICI2")
-        # df.reset_index(drop=True, inplace=True)
-        
-        return 1
-
         # Replace all 0 volume with a Nan  (to allow for ffill and bfill to work)
         df.loc[df['volume'] == 0, 'volume'] = np.nan
 
@@ -485,13 +406,89 @@ class EodhdProcessor:
             )
 
         df.reset_index(drop=True, inplace=True)
+
+        print("returning")
+
         return df
 
 
+    # process = psutil.Process(os.getpid())
+    # print(f"Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
 
-    def add_technical_indicator(
+    # def add_technical_indicator(
+    #     self,
+    #     df,
+    #     tech_indicator_list=[
+    #         "macd",
+    #         "boll_ub",
+    #         "boll_lb",
+    #         "rsi_30",
+    #         "dx_30",
+    #         "close_30_sma",
+    #         "close_60_sma",
+    #     ],
+    # ):
+    #     df = df.rename(columns={"time": "date"})
+    #     df = df.sort_values(by=["tic", "date"])
+
+    #     stock = Sdf.retype(df)
+
+    #     # Calculate and store indicators first
+    #     for indicator in tech_indicator_list:
+    #         print(f"Calculating indicator: {indicator}")
+    #         stock[indicator] = stock[indicator]  # store indicator results in stock
+    #         stock[indicator] = pd.to_numeric(stock[indicator], downcast="float")
+    #         print(stock[indicator])
+
+    #     unique_ticker = df["tic"].unique()
+    #     grouped_stock = stock.groupby('tic')
+    #     grouped_df = df.groupby('tic')
+
+    #     for indicator in tech_indicator_list:
+    #         print(f"Processing indicator {indicator}")
+    #         indicator_data = []
+
+
+
+    #         process = psutil.Process(os.getpid())
+    #         print(f"Memory usage: {process.memory_info().rss / 1024 ** 2:.2f} MB") # 7Go
+
+    #         for tic in unique_ticker:
+
+                
+    #             if tic in grouped_stock.groups:
+    #                 temp = grouped_stock.get_group(tic)[[indicator]].copy()
+    #                 temp["tic"] = tic
+    #                 temp["date"] = grouped_df.get_group(tic)["date"].values
+
+    #                 indicator_data.append(temp)
+
+    #                 del temp
+
+    #         indicator_df = pd.concat(indicator_data, axis=0, ignore_index=True)
+    #         df = df.merge(
+    #             indicator_df[["tic", "date", indicator]],
+    #             on=["tic", "date"],
+    #             how="left"
+    #         )
+
+    #         print("indicator_df.dtypes")
+    #         print(indicator_df.dtypes)
+    #         exit()
+
+
+    #         del indicator_data
+    #         del indicator_df
+
+    #     df = df.sort_values(by=["date", "tic"])
+    #     print("Successfully added technical indicators")
+    #     return df
+
+
+    def create_indicators(
         self,
         df,
+        output_dir="indicators",
         tech_indicator_list=[
             "macd",
             "boll_ub",
@@ -502,100 +499,207 @@ class EodhdProcessor:
             "close_60_sma",
         ],
     ):
+        os.makedirs(output_dir, exist_ok=True)
         df = df.rename(columns={"time": "date"})
-        df = df.copy()
         df = df.sort_values(by=["tic", "date"])
         stock = Sdf.retype(df.copy())
         unique_ticker = stock.tic.unique()
-        tech_indicator_list = tech_indicator_list
 
         for indicator in tech_indicator_list:
-            print("doing indicator {}".format(indicator))
-            indicator_df = pd.DataFrame()
-            for i in range(len(unique_ticker)):
-                # print(unique_ticker[i], i)
-                temp_indicator = stock[stock.tic == unique_ticker[i]][indicator]
-                temp_indicator = pd.DataFrame(temp_indicator)
-                temp_indicator["tic"] = unique_ticker[i]
-                # print(len(df[df.tic == unique_ticker[i]]['date'].to_list()))
-                temp_indicator["date"] = df[df.tic == unique_ticker[i]][
-                    "date"
-                ].to_list()
-                # indicator_df = indicator_df.append(temp_indicator, ignore_index=True)
-                indicator_df = pd.concat(
-                    [indicator_df, temp_indicator], axis=0, ignore_index=True
-                )
+            print(f"Generating indicator: {indicator}")
+            indicator_data = []
 
-            df = df.merge(
-                indicator_df[["tic", "date", indicator]], on=["tic", "date"], how="left"
-            )
+            for tic in unique_ticker:
+                temp_df = pd.DataFrame(stock[stock.tic == tic][indicator])
+                temp_df["tic"] = tic
+                temp_df["date"] = df[df.tic == tic]["date"].values
+                indicator_data.append(temp_df)
+
+            indicator_df = pd.concat(indicator_data, ignore_index=True)
+            path = os.path.join(output_dir, f"{indicator}.parquet")
+            indicator_df.to_parquet(path, index=False)
+            print(f"Saved: {path}")
+
+        return
+
+
+
+    def add_technical_indicators(
+        self,
+        df,
+        input_dir="indicators",
+        tech_indicator_list=[
+            "macd",
+            "boll_ub",
+            "boll_lb",
+            "rsi_30",
+            "dx_30",
+            "close_30_sma",
+            "close_60_sma",
+        ],
+    ):
+        df = df.rename(columns={"time": "date"}) if "time" in df.columns else df
+        df = df.sort_values(by=["tic", "date"])
+
+        print("df.dtypes1")
+        print(df.dtypes)
+
+        for indicator in tech_indicator_list:
+            path = os.path.join(input_dir, f"{indicator}.parquet")
+            print(f"Merging indicator from: {path}")
+            if os.path.exists(path):
+                indicator_df = pd.read_parquet(path)
+
+                indicator_df[indicator] = pd.to_numeric(indicator_df[indicator], downcast="float")
+                indicator_df["tic"] = indicator_df["tic"].astype("category")
+
+                df = df.merge(indicator_df, on=["tic", "date"], how="left")
+                print(df.head(5))
+  
+
+            else:
+                print(f"Warning: {path} not found. Skipping.")
+        
+
+        print(df.head())
         df = df.sort_values(by=["date", "tic"])
-        print("Succesfully add technical indicators")
+        print("Successfully merged all technical indicators.")
+        print(df.head())
         return df
 
 
 
+    def calculate_turbulence(self, df, time_period=252):
+        print("ICI1")
+        df_price_pivot = df.pivot(index="date", columns="tic", values="close").pct_change()
+
+        unique_dates = df_price_pivot.index
+        turbulence_index = np.zeros(len(unique_dates))
+        turbulence_index[:time_period] = 0
+        print("ICI2")
+        # Pre-compute column-wise non-NaN counts
+        non_nan_counts = df_price_pivot.notna().sum()
+        len_unique_date = len(unique_dates)
+        for i in range(time_period, len(unique_dates)):
+
+            print(str((i / len_unique_date) * 100)) # 0.02
+            current_date = unique_dates[i]
+            past_window = df_price_pivot.iloc[i - time_period:i]
+
+            # Drop columns (tickers) with too many missing values
+            min_non_nan = past_window.notna().sum().min()
+            filtered = past_window.loc[:, past_window.notna().sum() >= min_non_nan].dropna(axis=1)
+
+            if filtered.shape[1] < 2:
+                turbulence_index[i] = 0
+                continue
+
+            cov_matrix = filtered.cov().values
+            try:
+                inv_cov = np.linalg.pinv(cov_matrix)
+            except np.linalg.LinAlgError:
+                turbulence_index[i] = 0
+                continue
+
+            current_row = df_price_pivot.loc[current_date, filtered.columns]
+            mean_row = filtered.mean()
+            diff = (current_row - mean_row).values.reshape(1, -1)
+
+            temp = diff @ inv_cov @ diff.T
+            temp_value = temp[0, 0] if temp > 0 else 0
+            turbulence_index[i] = temp_value if i - time_period > 2 else 0
+
+        return pd.DataFrame({
+            "date": unique_dates,
+            "turbulence": turbulence_index
+        })
 
 
 
-    def calculate_turbulence(self, data, time_period=252):
-        # can add other market assets
-        df = data.copy()
-        df_price_pivot = df.pivot(index="date", columns="tic", values="close")
-        # use returns to calculate turbulence
-        df_price_pivot = df_price_pivot.pct_change()
 
-        unique_date = df.date.unique()
-        # start after a fixed time period
-        start = time_period
-        turbulence_index = [0] * start
-        # turbulence_index = [0]
-        count = 0
-        for i in range(start, len(unique_date)):
-            current_price = df_price_pivot[df_price_pivot.index == unique_date[i]]
-            # use one year rolling window to calcualte covariance
-            hist_price = df_price_pivot[
-                (df_price_pivot.index < unique_date[i])
-                & (df_price_pivot.index >= unique_date[i - time_period])
-            ]
-            # Drop tickers which has number missing values more than the "oldest" ticker
-            filtered_hist_price = hist_price.iloc[
-                hist_price.isna().sum().min() :
-            ].dropna(axis=1)
 
-            cov_temp = filtered_hist_price.cov()
-            current_temp = current_price[[x for x in filtered_hist_price]] - np.mean(
-                filtered_hist_price, axis=0
+
+
+    # Global shared data (read-only)
+    _shared_price_pivot = None
+    _shared_unique_dates = None
+    _shared_time_period = None
+
+    def _init_worker(self, price_pivot, unique_dates, time_period):
+        global _shared_price_pivot, _shared_unique_dates, _shared_time_period
+        _shared_price_pivot = price_pivot
+        _shared_unique_dates = unique_dates
+        _shared_time_period = time_period
+
+    def _compute_turbulence(self, i):
+        current_date = _shared_unique_dates[i]
+        df_price_pivot = _shared_price_pivot
+        time_period = _shared_time_period
+
+        hist_prices = df_price_pivot.iloc[i - time_period:i]
+        current_price = df_price_pivot.loc[current_date]
+
+        # Drop columns with too many NaNs
+        min_non_nan = hist_prices.notna().sum().min()
+        filtered = hist_prices.loc[:, hist_prices.notna().sum() >= min_non_nan].dropna(axis=1)
+
+        if filtered.shape[1] < 2:
+            return 0.0
+
+        cov_matrix = filtered.cov().values
+        try:
+            inv_cov = np.linalg.pinv(cov_matrix)
+        except np.linalg.LinAlgError:
+            return 0.0
+
+        current_diff = (current_price[filtered.columns] - filtered.mean()).values.reshape(1, -1)
+        turbulence = current_diff @ inv_cov @ current_diff.T
+
+        turbulence_value = turbulence[0, 0] if turbulence > 0 else 0.0
+        if i - time_period <= 2:
+            return 0.0
+        return turbulence_value
+
+    def calculate_turbulence_parallel(self, df, time_period=252, num_processes=None):
+
+        print("IN 0")
+
+        df_price_pivot = df.pivot(index="date", columns="tic", values="close").pct_change()
+        unique_dates = df_price_pivot.index
+        print("IN 1")
+        indices = list(range(time_period, len(unique_dates)))
+        print("IN 2")
+        if num_processes is None:
+            num_processes = min(cpu_count(), 8)
+
+        print("IN 3")
+
+        with Pool(
+            processes=num_processes,
+            initializer=self._init_worker,
+            initargs=(df_price_pivot, unique_dates, time_period)
+        ) as pool:
+            turbulence_values = list(
+                tqdm(pool.map(self._compute_turbulence, indices), total=len(indices))
             )
-            temp = current_temp.values.dot(np.linalg.pinv(cov_temp)).dot(
-                current_temp.values.T
-            )
-            if temp > 0:
-                count += 1
-                if count > 2:
-                    turbulence_temp = temp[0][0]
-                else:
-                    # avoid large outlier because of the calculation just begins
-                    turbulence_temp = 0
-            else:
-                turbulence_temp = 0
-            turbulence_index.append(turbulence_temp)
-
-        turbulence_index = pd.DataFrame(
-            {"date": df_price_pivot.index, "turbulence": turbulence_index}
-        )
-        return turbulence_index
+        print("IN 4")
+        # Build turbulence series
+        turbulence_index = [0.0] * time_period + turbulence_values
+        return pd.DataFrame({"date": unique_dates, "turbulence": turbulence_index})
 
 
 
-    def add_turbulence(self, data, time_period=252):
+
+
+
+    def add_turbulence(self, df, time_period=252):
         """
         add turbulence index from a precalcualted dataframe
         :param data: (df) pandas dataframe
         :return: (df) pandas dataframe
         """
-        df = data.copy()
-        turbulence_index = self.calculate_turbulence(df, time_period=time_period)
+        print("ICI0")
+        turbulence_index = self.calculate_turbulence_parallel(df, time_period=time_period)
         df = df.merge(turbulence_index, on="date")
         df = df.sort_values(["date", "tic"]).reset_index(drop=True)
         return df
